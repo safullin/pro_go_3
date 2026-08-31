@@ -1,0 +1,11 @@
+.env
+.idea/
+.vscode/
+bin/
+coverage.out
+gophkeeper
+gophkeeper-server
+*.db
+*.pem
+*.key
+
