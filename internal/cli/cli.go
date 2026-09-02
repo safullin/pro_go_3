@@ -27,17 +27,17 @@ type BuildInfo struct {
 }
 
 type application struct {
-	build       BuildInfo
-	address     string
-	caFile      string
-	serverName  string
-	insecure    bool
-	timeout     time.Duration
-	sessionFile string
-	password    string
-	stdin       io.Reader
-	stdout      io.Writer
-	stderr      io.Writer
+	build        BuildInfo
+	address      string
+	caFile       string
+	serverName   string
+	timeout      time.Duration
+	sessionFile  string
+	cacheFile    string
+	readPassword func() (string, error)
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
 }
 
 // NewRoot builds the root GophKeeper CLI command.
@@ -47,9 +47,7 @@ func NewRoot(build BuildInfo) *cobra.Command {
 		address:    envString("GOPHKEEPER_ADDRESS", "127.0.0.1:3200"),
 		caFile:     os.Getenv("GOPHKEEPER_CA"),
 		serverName: os.Getenv("GOPHKEEPER_SERVER_NAME"),
-		insecure:   envBool("GOPHKEEPER_INSECURE"),
 		timeout:    envDuration("GOPHKEEPER_TIMEOUT", 15*time.Second),
-		password:   os.Getenv("GOPHKEEPER_PASSWORD"),
 		stdin:      os.Stdin,
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,
@@ -58,6 +56,11 @@ func NewRoot(build BuildInfo) *cobra.Command {
 	if value := os.Getenv("GOPHKEEPER_SESSION"); value != "" {
 		app.sessionFile = value
 	}
+	app.cacheFile = app.sessionFile + ".cache"
+	if value := os.Getenv("GOPHKEEPER_CACHE"); value != "" {
+		app.cacheFile = value
+	}
+	app.readPassword = func() (string, error) { return readTerminalPassword(os.Stdin, os.Stderr) }
 	return newRoot(app)
 }
 
@@ -75,10 +78,9 @@ func newRoot(app *application) *cobra.Command {
 	flags.StringVarP(&app.address, "address", "a", app.address, "gRPC server address")
 	flags.StringVar(&app.caFile, "ca", app.caFile, "server CA certificate")
 	flags.StringVar(&app.serverName, "server-name", app.serverName, "TLS server name")
-	flags.BoolVar(&app.insecure, "insecure", app.insecure, "disable TLS for local development")
 	flags.DurationVar(&app.timeout, "timeout", app.timeout, "request timeout")
 	flags.StringVar(&app.sessionFile, "session", app.sessionFile, "session file")
-	flags.StringVar(&app.password, "password", app.password, "master password")
+	flags.StringVar(&app.cacheFile, "cache", app.cacheFile, "encrypted local cache file")
 	root.AddCommand(
 		app.registerCommand(),
 		app.loginCommand(),
@@ -86,6 +88,7 @@ func newRoot(app *application) *cobra.Command {
 		app.updateCommand(),
 		app.listCommand(),
 		app.getCommand(),
+		app.searchCommand(),
 		app.deleteCommand(),
 		app.syncCommand(),
 		app.versionCommand(),
@@ -107,7 +110,7 @@ func (a *application) registerCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer api.Close()
+			defer func() { _ = api.Close() }()
 			ctx, cancel := context.WithTimeout(command.Context(), a.timeout)
 			defer cancel()
 			session, err := api.Register(ctx, args[0], password, a.address)
@@ -117,8 +120,8 @@ func (a *application) registerCommand() *cobra.Command {
 			if err = client.SaveSession(a.sessionFile, session); err != nil {
 				return err
 			}
-			fmt.Fprintln(a.stdout, "Account registered")
-			return nil
+			_, err = fmt.Fprintln(a.stdout, "Account registered")
+			return err
 		},
 	}
 }
@@ -137,7 +140,7 @@ func (a *application) loginCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer api.Close()
+			defer func() { _ = api.Close() }()
 			ctx, cancel := context.WithTimeout(command.Context(), a.timeout)
 			defer cancel()
 			session, err := api.Login(ctx, args[0], password, a.address)
@@ -147,8 +150,8 @@ func (a *application) loginCommand() *cobra.Command {
 			if err = client.SaveSession(a.sessionFile, session); err != nil {
 				return err
 			}
-			fmt.Fprintln(a.stdout, "Authenticated")
-			return nil
+			_, err = fmt.Fprintln(a.stdout, "Authenticated")
+			return err
 		},
 	}
 }
@@ -270,8 +273,9 @@ func (a *application) put(command *cobra.Command, args []string, update bool, ki
 		if err != nil {
 			return fmt.Errorf("save entry: %w", err)
 		}
-		fmt.Fprintf(a.stdout, "%s\t%d\n", entry.Secret.ID, entry.Secret.Version)
-		return nil
+		a.refreshCache(ctx, api)
+		_, err = fmt.Fprintf(a.stdout, "%s\t%d\n", entry.Secret.ID, entry.Secret.Version)
+		return err
 	})
 }
 
@@ -281,20 +285,22 @@ func (a *application) listCommand() *cobra.Command {
 		Short: "List current private data",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return a.withAuthenticated(command, func(ctx context.Context, api *client.Client) error {
-				result, err := api.Sync(ctx, 0)
-				if err != nil {
-					return fmt.Errorf("list entries: %w", err)
-				}
-				writer := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
-				fmt.Fprintln(writer, "ID\tTYPE\tVERSION\tUPDATED\tNAME\tMETADATA")
-				for _, entry := range result.Entries {
-					fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\n",
-						entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version,
-						entry.Secret.UpdatedAt.Format(time.RFC3339), entry.Payload.Name, entry.Payload.Metadata)
-				}
-				return writer.Flush()
-			})
+			return a.withOnlineFallback(command,
+				func(ctx context.Context, api *client.Client) error {
+					result, err := api.SyncToCache(ctx, 0, a.cacheFile)
+					if err != nil {
+						return fmt.Errorf("list entries: %w", err)
+					}
+					return a.printEntries(result.Entries)
+				},
+				func(api *client.Client) error {
+					result, err := api.ReadCache(a.cacheFile)
+					if err != nil {
+						return fmt.Errorf("read offline cache: %w", err)
+					}
+					return a.printEntries(result.Entries)
+				},
+			)
 		},
 	}
 }
@@ -306,17 +312,53 @@ func (a *application) getCommand() *cobra.Command {
 		Short: "Show private data",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			return a.withAuthenticated(command, func(ctx context.Context, api *client.Client) error {
-				entry, err := api.Get(ctx, args[0])
-				if err != nil {
-					return fmt.Errorf("get entry: %w", err)
-				}
-				return a.printEntry(entry, output)
-			})
+			return a.withOnlineFallback(command,
+				func(ctx context.Context, api *client.Client) error {
+					entry, err := api.Get(ctx, args[0])
+					if err != nil {
+						return fmt.Errorf("get entry: %w", err)
+					}
+					a.refreshCache(ctx, api)
+					return a.printEntry(entry, output)
+				},
+				func(api *client.Client) error {
+					entry, err := api.GetCached(a.cacheFile, args[0])
+					if err != nil {
+						return fmt.Errorf("read offline cache: %w", err)
+					}
+					return a.printEntry(entry, output)
+				},
+			)
 		},
 	}
 	command.Flags().StringVarP(&output, "output", "o", "", "output path for binary data")
 	return command
+}
+
+func (a *application) searchCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "search QUERY",
+		Short: "Search private data by name or metadata",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			return a.withOnlineFallback(command,
+				func(ctx context.Context, api *client.Client) error {
+					entries, err := api.Search(ctx, args[0])
+					if err != nil {
+						return fmt.Errorf("search entries: %w", err)
+					}
+					return a.printEntries(entries)
+				},
+				func(api *client.Client) error {
+					entries, err := api.SearchCached(a.cacheFile, args[0])
+					if err != nil {
+						return fmt.Errorf("search offline cache: %w", err)
+					}
+					return a.printEntries(entries)
+				},
+			)
+		},
+	}
 }
 
 func (a *application) deleteCommand() *cobra.Command {
@@ -333,8 +375,9 @@ func (a *application) deleteCommand() *cobra.Command {
 				if err = api.Delete(ctx, args[0], version); err != nil {
 					return fmt.Errorf("delete entry: %w", err)
 				}
-				fmt.Fprintln(a.stdout, "Deleted")
-				return nil
+				a.refreshCache(ctx, api)
+				_, err = fmt.Fprintln(a.stdout, "Deleted")
+				return err
 			})
 		},
 	}
@@ -351,16 +394,22 @@ func (a *application) syncCommand() *cobra.Command {
 				return errors.New("cursor cannot be negative")
 			}
 			return a.withAuthenticated(command, func(ctx context.Context, api *client.Client) error {
-				result, err := api.Sync(ctx, since)
+				result, err := api.SyncToCache(ctx, since, a.cacheFile)
 				if err != nil {
 					return fmt.Errorf("synchronize entries: %w", err)
 				}
-				fmt.Fprintf(a.stdout, "Changes: %d, deleted: %d, cursor: %d\n", len(result.Entries), len(result.Deleted), result.Cursor)
+				if _, err = fmt.Fprintf(a.stdout, "Changes: %d, deleted: %d, cursor: %d\n", len(result.Entries), len(result.Deleted), result.Cursor); err != nil {
+					return err
+				}
 				for _, entry := range result.Entries {
-					fmt.Fprintf(a.stdout, "%s\t%s\t%d\t%s\n", entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version, entry.Payload.Name)
+					if _, err = fmt.Fprintf(a.stdout, "%s\t%s\t%d\t%s\n", entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version, entry.Payload.Name); err != nil {
+						return err
+					}
 				}
 				for _, id := range result.Deleted {
-					fmt.Fprintf(a.stdout, "%s\tdeleted\n", id)
+					if _, err = fmt.Fprintf(a.stdout, "%s\tdeleted\n", id); err != nil {
+						return err
+					}
 				}
 				return nil
 			})
@@ -375,19 +424,16 @@ func (a *application) versionCommand() *cobra.Command {
 		Use:   "version",
 		Short: "Print client build information",
 		Args:  cobra.NoArgs,
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Fprintf(a.stdout, "Build version: %s\nBuild date: %s\nBuild commit: %s\n",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintf(a.stdout, "Build version: %s\nBuild date: %s\nBuild commit: %s\n",
 				buildValue(a.build.Version), buildValue(a.build.Date), buildValue(a.build.Commit))
+			return err
 		},
 	}
 }
 
 func (a *application) withAuthenticated(command *cobra.Command, action func(context.Context, *client.Client) error) error {
-	session, err := client.LoadSession(a.sessionFile)
-	if err != nil {
-		return fmt.Errorf("load session: %w", err)
-	}
-	password, err := a.masterPassword()
+	session, password, _, err := a.offlineClient()
 	if err != nil {
 		return err
 	}
@@ -395,7 +441,7 @@ func (a *application) withAuthenticated(command *cobra.Command, action func(cont
 	if err != nil {
 		return err
 	}
-	defer api.Close()
+	defer func() { _ = api.Close() }()
 	if err = api.Restore(session, password); err != nil {
 		return fmt.Errorf("restore session: %w", err)
 	}
@@ -404,36 +450,83 @@ func (a *application) withAuthenticated(command *cobra.Command, action func(cont
 	return action(ctx, api)
 }
 
+func (a *application) withOnlineFallback(command *cobra.Command, online func(context.Context, *client.Client) error, offline func(*client.Client) error) error {
+	session, password, cached, err := a.offlineClient()
+	if err != nil {
+		return err
+	}
+	api, err := a.connect()
+	if err != nil {
+		return offline(cached)
+	}
+	defer func() { _ = api.Close() }()
+	if err = api.Restore(session, password); err != nil {
+		return fmt.Errorf("restore session: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(command.Context(), a.timeout)
+	defer cancel()
+	if err = online(ctx, api); err == nil {
+		return nil
+	}
+	if !client.IsUnavailable(err) {
+		return err
+	}
+	return offline(cached)
+}
+
+func (a *application) offlineClient() (client.Session, string, *client.Client, error) {
+	session, err := client.LoadSession(a.sessionFile)
+	if err != nil {
+		return client.Session{}, "", nil, fmt.Errorf("load session: %w", err)
+	}
+	password, err := a.masterPassword()
+	if err != nil {
+		return client.Session{}, "", nil, err
+	}
+	api := client.NewOffline()
+	if err = api.Restore(session, password); err != nil {
+		return client.Session{}, "", nil, fmt.Errorf("restore session: %w", err)
+	}
+	return session, password, api, nil
+}
+
 func (a *application) connect() (*client.Client, error) {
 	if a.timeout <= 0 {
 		return nil, errors.New("timeout must be positive")
 	}
-	if !a.insecure && a.caFile == "" {
-		return nil, errors.New("CA certificate is required unless insecure mode is enabled")
+	if a.caFile == "" {
+		return nil, errors.New("CA certificate is required")
 	}
 	return client.Dial(config.Client{
 		Address:     a.address,
 		CAFile:      a.caFile,
 		ServerName:  a.serverName,
-		Insecure:    a.insecure,
 		Timeout:     a.timeout,
 		SessionFile: a.sessionFile,
 	})
 }
 
 func (a *application) masterPassword() (string, error) {
-	if a.password != "" {
-		return a.password, nil
+	if a.readPassword == nil {
+		return "", errors.New("master password reader is not configured")
 	}
-	file, ok := a.stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(file.Fd())) {
-		return "", errors.New("master password is required")
+	return a.readPassword()
+}
+
+func readTerminalPassword(stdin *os.File, stderr io.Writer) (string, error) {
+	if !term.IsTerminal(int(stdin.Fd())) {
+		return "", errors.New("master password requires an interactive terminal")
 	}
-	fmt.Fprint(a.stderr, "Master password: ")
-	value, err := term.ReadPassword(int(file.Fd()))
-	fmt.Fprintln(a.stderr)
+	if _, err := fmt.Fprint(stderr, "Master password: "); err != nil {
+		return "", fmt.Errorf("write password prompt: %w", err)
+	}
+	value, err := term.ReadPassword(int(stdin.Fd()))
+	_, newlineErr := fmt.Fprintln(stderr)
 	if err != nil {
 		return "", fmt.Errorf("read master password: %w", err)
+	}
+	if newlineErr != nil {
+		return "", fmt.Errorf("write password prompt: %w", newlineErr)
 	}
 	if len(value) == 0 {
 		return "", errors.New("master password is required")
@@ -441,14 +534,39 @@ func (a *application) masterPassword() (string, error) {
 	return string(value), nil
 }
 
+func (a *application) refreshCache(ctx context.Context, api *client.Client) {
+	if _, err := api.SyncToCache(ctx, 0, a.cacheFile); err != nil {
+		_, _ = fmt.Fprintf(a.stderr, "Local cache was not updated: %v\n", err)
+	}
+}
+
+func (a *application) printEntries(entries []domain.Entry) error {
+	writer := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(writer, "ID\tTYPE\tVERSION\tUPDATED\tNAME\tMETADATA"); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\n",
+			entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version,
+			entry.Secret.UpdatedAt.Format(time.RFC3339), entry.Secret.Name, entry.Secret.Metadata); err != nil {
+			return err
+		}
+	}
+	return writer.Flush()
+}
+
 func (a *application) printEntry(entry domain.Entry, output string) error {
-	fmt.Fprintf(a.stdout, "ID: %s\nType: %s\nVersion: %d\nName: %s\nMetadata: %s\n",
-		entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version, entry.Payload.Name, entry.Payload.Metadata)
+	if _, err := fmt.Fprintf(a.stdout, "ID: %s\nType: %s\nVersion: %d\nName: %s\nMetadata: %s\n",
+		entry.Secret.ID, entry.Secret.Kind, entry.Secret.Version, entry.Payload.Name, entry.Payload.Metadata); err != nil {
+		return err
+	}
 	switch entry.Secret.Kind {
 	case domain.SecretKindCredentials:
-		fmt.Fprintf(a.stdout, "Login: %s\nPassword: %s\n", entry.Payload.Credentials.Login, entry.Payload.Credentials.Password)
+		_, err := fmt.Fprintf(a.stdout, "Login: %s\nPassword: %s\n", entry.Payload.Credentials.Login, entry.Payload.Credentials.Password)
+		return err
 	case domain.SecretKindText:
-		fmt.Fprintln(a.stdout, entry.Payload.Text.Value)
+		_, err := fmt.Fprintln(a.stdout, entry.Payload.Text.Value)
+		return err
 	case domain.SecretKindBinary:
 		if output == "" {
 			return errors.New("output path is required for binary data")
@@ -456,10 +574,12 @@ func (a *application) printEntry(entry domain.Entry, output string) error {
 		if err := os.WriteFile(output, entry.Payload.Binary.Data, 0o600); err != nil {
 			return fmt.Errorf("write binary file: %w", err)
 		}
-		fmt.Fprintf(a.stdout, "Saved to %s\n", output)
+		_, err := fmt.Fprintf(a.stdout, "Saved to %s\n", output)
+		return err
 	case domain.SecretKindCard:
-		fmt.Fprintf(a.stdout, "Number: %s\nHolder: %s\nExpiry: %s\nCVV: %s\n",
+		_, err := fmt.Fprintf(a.stdout, "Number: %s\nHolder: %s\nExpiry: %s\nCVV: %s\n",
 			entry.Payload.Card.Number, entry.Payload.Card.Holder, entry.Payload.Card.Expiry, entry.Payload.Card.CVV)
+		return err
 	}
 	return nil
 }
@@ -483,11 +603,6 @@ func envString(name, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func envBool(name string) bool {
-	value, err := strconv.ParseBool(os.Getenv(name))
-	return err == nil && value
 }
 
 func envDuration(name string, fallback time.Duration) time.Duration {

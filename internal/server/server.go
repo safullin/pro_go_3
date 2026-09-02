@@ -8,11 +8,11 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/safullin/pro_go_3/internal/auth"
@@ -23,6 +23,8 @@ import (
 )
 
 const maxSecretSize = 16 << 20
+
+var dummyPasswordHash = []byte("$2a$10$P8T8Pq5ev7u8kpsyKBifCugAdzaUhr2EkuxFHwPFfcclXj5.RfTmm")
 
 type identityKey struct{}
 
@@ -38,12 +40,13 @@ func NewService(store storage.Store, tokens *auth.Manager) *Service {
 	return &Service{store: store, tokens: tokens}
 }
 
-// NewGRPCServer creates and configures a gRPC server for the service.
-func NewGRPCServer(service *Service, tokens *auth.Manager, options ...grpc.ServerOption) *grpc.Server {
-	options = append(options,
+// NewGRPCServer creates a gRPC server with mandatory TLS transport credentials.
+func NewGRPCServer(service *Service, tokens *auth.Manager, transport credentials.TransportCredentials) *grpc.Server {
+	options := []grpc.ServerOption{
+		grpc.Creds(transport),
 		grpc.UnaryInterceptor(AuthorizationInterceptor(tokens)),
-		grpc.MaxRecvMsgSize(maxSecretSize+1024),
-	)
+		grpc.MaxRecvMsgSize(maxSecretSize + 1024),
+	}
 	server := grpc.NewServer(options...)
 	gophkeeperpb.RegisterGophKeeperServer(server, service)
 	healthServer := health.NewServer()
@@ -93,7 +96,16 @@ func (s *Service) Register(ctx context.Context, request *gophkeeperpb.RegisterRe
 // Login authenticates an existing account.
 func (s *Service) Login(ctx context.Context, request *gophkeeperpb.LoginRequest) (*gophkeeperpb.AuthResponse, error) {
 	user, err := s.store.UserByLogin(ctx, strings.TrimSpace(request.GetLogin()))
-	if err != nil || !auth.VerifyPassword(user.PasswordHash, request.GetPassword()) {
+	hash := dummyPasswordHash
+	userExists := err == nil
+	if userExists {
+		hash = user.PasswordHash
+	}
+	passwordValid := auth.VerifyPassword(hash, request.GetPassword())
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, status.Errorf(codes.Internal, "find user: %v", err)
+	}
+	if !userExists || !passwordValid {
 		return nil, status.Error(codes.Unauthenticated, "invalid login or password")
 	}
 	return s.authResponse(user)
@@ -154,15 +166,36 @@ func (s *Service) ListSecrets(ctx context.Context, request *gophkeeperpb.ListSec
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list secrets: %v", err)
 	}
-	response := &gophkeeperpb.ListSecretsResponse{Cursor: cursor, Secrets: make([]*gophkeeperpb.Secret, 0, len(secrets))}
+	items := make([]*gophkeeperpb.Secret, 0, len(secrets))
 	for _, secret := range secrets {
-		response.Secrets = append(response.Secrets, secretToProto(secret))
+		items = append(items, secretToProto(secret))
 	}
-	return response, nil
+	return gophkeeperpb.ListSecretsResponse_builder{Cursor: cursor, Secrets: items}.Build(), nil
+}
+
+// SearchSecrets returns active encrypted secrets matching name or metadata.
+func (s *Service) SearchSecrets(ctx context.Context, request *gophkeeperpb.SearchSecretsRequest) (*gophkeeperpb.SearchSecretsResponse, error) {
+	identity, err := identityFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := strings.TrimSpace(request.GetQuery())
+	if query == "" || len(query) > 1024 {
+		return nil, status.Error(codes.InvalidArgument, "search query must contain from 1 to 1024 characters")
+	}
+	secrets, err := s.store.SearchSecrets(ctx, identity.UserID, query)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "search secrets: %v", err)
+	}
+	items := make([]*gophkeeperpb.Secret, 0, len(secrets))
+	for _, secret := range secrets {
+		items = append(items, secretToProto(secret))
+	}
+	return gophkeeperpb.SearchSecretsResponse_builder{Secrets: items}.Build(), nil
 }
 
 // DeleteSecret marks a secret as deleted for synchronization with other clients.
-func (s *Service) DeleteSecret(ctx context.Context, request *gophkeeperpb.DeleteSecretRequest) (*emptypb.Empty, error) {
+func (s *Service) DeleteSecret(ctx context.Context, request *gophkeeperpb.DeleteSecretRequest) (*gophkeeperpb.DeleteSecretResponse, error) {
 	identity, err := identityFromContext(ctx)
 	if err != nil {
 		return nil, err
@@ -180,7 +213,7 @@ func (s *Service) DeleteSecret(ctx context.Context, request *gophkeeperpb.Delete
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "delete secret: %v", err)
 	}
-	return &emptypb.Empty{}, nil
+	return gophkeeperpb.DeleteSecretResponse_builder{}.Build(), nil
 }
 
 func (s *Service) authResponse(user storage.User) (*gophkeeperpb.AuthResponse, error) {
@@ -188,7 +221,7 @@ func (s *Service) authResponse(user storage.User) (*gophkeeperpb.AuthResponse, e
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue authorization token: %v", err)
 	}
-	return &gophkeeperpb.AuthResponse{Token: token, Salt: append([]byte(nil), user.Salt...)}, nil
+	return gophkeeperpb.AuthResponse_builder{Token: token, Salt: append([]byte(nil), user.Salt...)}.Build(), nil
 }
 
 func identityFromMetadata(ctx context.Context, tokens *auth.Manager) (auth.Identity, error) {
@@ -232,22 +265,29 @@ func secretFromProto(secret *gophkeeperpb.Secret) (domain.Secret, error) {
 	if len(secret.GetNonce()) != 12 {
 		return domain.Secret{}, errors.New("invalid encryption nonce")
 	}
+	if strings.TrimSpace(secret.GetName()) == "" {
+		return domain.Secret{}, errors.New("secret name is required")
+	}
 	return domain.Secret{
 		ID:         secret.GetId(),
 		Kind:       kind,
+		Name:       secret.GetName(),
+		Metadata:   secret.GetMetadata(),
 		Ciphertext: append([]byte(nil), secret.GetCiphertext()...),
 		Nonce:      append([]byte(nil), secret.GetNonce()...),
 	}, nil
 }
 
 func secretToProto(secret domain.Secret) *gophkeeperpb.Secret {
-	return &gophkeeperpb.Secret{
+	return gophkeeperpb.Secret_builder{
 		Id:         secret.ID,
 		Kind:       gophkeeperpb.SecretKind(secret.Kind),
+		Name:       secret.Name,
+		Metadata:   secret.Metadata,
 		Ciphertext: append([]byte(nil), secret.Ciphertext...),
 		Nonce:      append([]byte(nil), secret.Nonce...),
 		Version:    secret.Version,
 		Deleted:    secret.Deleted,
 		UpdatedAt:  timestamppb.New(secret.UpdatedAt),
-	}
+	}.Build()
 }

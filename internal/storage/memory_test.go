@@ -28,7 +28,7 @@ func TestMemoryStore(t *testing.T) {
 	if _, err = store.UserByLogin(ctx, "unknown"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected unknown user, got %v", err)
 	}
-	secret := domain.Secret{ID: uuid.NewString(), Kind: domain.SecretKindText, Ciphertext: []byte("cipher"), Nonce: []byte("nonce")}
+	secret := domain.Secret{ID: uuid.NewString(), Kind: domain.SecretKindText, Name: "Note", Metadata: "personal", Ciphertext: []byte("cipher"), Nonce: []byte("nonce")}
 	created, err := store.PutSecret(ctx, found.ID, secret, 0)
 	if err != nil || created.Version == 0 {
 		t.Fatalf("create secret: %+v %v", created, err)
@@ -64,6 +64,14 @@ func TestMemoryStore(t *testing.T) {
 	if len(changes) != 0 {
 		t.Fatal("old changes returned")
 	}
+	matches, err := store.SearchSecrets(ctx, found.ID, "PERSON")
+	if err != nil || len(matches) != 1 || matches[0].ID != secret.ID {
+		t.Fatalf("search secret: %+v %v", matches, err)
+	}
+	matches, err = store.SearchSecrets(ctx, other.ID, "personal")
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("other user search returned secrets: %+v %v", matches, err)
+	}
 	if err = store.DeleteSecret(ctx, found.ID, secret.ID, updated.Version+1); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected delete conflict, got %v", err)
 	}
@@ -77,8 +85,12 @@ func TestMemoryStore(t *testing.T) {
 		t.Fatalf("deleted secret returned: %v", err)
 	}
 	changes, _, _ = store.ListSecrets(ctx, found.ID, updated.Version)
-	if len(changes) != 1 || !changes[0].Deleted {
+	if len(changes) != 1 || !changes[0].Deleted || changes[0].Name != "" || changes[0].Metadata != "" {
 		t.Fatalf("delete tombstone missing: %+v", changes)
+	}
+	matches, err = store.SearchSecrets(ctx, found.ID, "personal")
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("deleted secret found: %+v %v", matches, err)
 	}
 	if err = store.Ping(ctx); err != nil {
 		t.Fatal(err)

@@ -62,6 +62,8 @@ type Secret struct {
 	ID         string
 	UserID     string
 	Kind       SecretKind
+	Name       string
+	Metadata   string
 	Ciphertext []byte
 	Nonce      []byte
 	Version    int64

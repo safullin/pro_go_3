@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 )
 
@@ -50,8 +49,8 @@ func ParseServer(args []string) (Server, error) {
 	if len(cfg.AuthSecret) < 32 {
 		return Server{}, errors.New("authorization secret must contain at least 32 characters")
 	}
-	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
-		return Server{}, errors.New("both TLS certificate and key must be configured")
+	if cfg.TLSCert == "" || cfg.TLSKey == "" {
+		return Server{}, errors.New("TLS certificate and key are required")
 	}
 	if cfg.TokenLifetime <= 0 {
 		return Server{}, errors.New("token lifetime must be positive")
@@ -64,7 +63,6 @@ type Client struct {
 	Address     string
 	CAFile      string
 	ServerName  string
-	Insecure    bool
 	Timeout     time.Duration
 	SessionFile string
 }
@@ -76,7 +74,6 @@ func ParseClient(args []string) (Client, error) {
 	flags.StringVar(&cfg.Address, "a", "127.0.0.1:3200", "gRPC server address")
 	flags.StringVar(&cfg.CAFile, "ca", "", "server CA certificate path")
 	flags.StringVar(&cfg.ServerName, "server-name", "", "TLS server name")
-	flags.BoolVar(&cfg.Insecure, "insecure", false, "disable TLS for local development")
 	flags.DurationVar(&cfg.Timeout, "timeout", 15*time.Second, "request timeout")
 	flags.StringVar(&cfg.SessionFile, "session", "", "session file path")
 	if err := flags.Parse(args); err != nil {
@@ -86,13 +83,6 @@ func ParseClient(args []string) (Client, error) {
 	setStringFromEnv(&cfg.CAFile, "GOPHKEEPER_CA")
 	setStringFromEnv(&cfg.ServerName, "GOPHKEEPER_SERVER_NAME")
 	setStringFromEnv(&cfg.SessionFile, "GOPHKEEPER_SESSION")
-	if value, ok := os.LookupEnv("GOPHKEEPER_INSECURE"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Client{}, fmt.Errorf("parse GOPHKEEPER_INSECURE: %w", err)
-		}
-		cfg.Insecure = parsed
-	}
 	if value, ok := os.LookupEnv("GOPHKEEPER_TIMEOUT"); ok {
 		duration, err := time.ParseDuration(value)
 		if err != nil {
@@ -103,8 +93,8 @@ func ParseClient(args []string) (Client, error) {
 	if cfg.Address == "" {
 		return Client{}, errors.New("server address is required")
 	}
-	if !cfg.Insecure && cfg.CAFile == "" {
-		return Client{}, errors.New("CA certificate is required unless insecure mode is enabled")
+	if cfg.CAFile == "" {
+		return Client{}, errors.New("CA certificate is required")
 	}
 	if cfg.Timeout <= 0 {
 		return Client{}, errors.New("request timeout must be positive")

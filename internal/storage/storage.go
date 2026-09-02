@@ -33,6 +33,7 @@ type Store interface {
 	PutSecret(context.Context, string, domain.Secret, int64) (domain.Secret, error)
 	GetSecret(context.Context, string, string) (domain.Secret, error)
 	ListSecrets(context.Context, string, int64) ([]domain.Secret, int64, error)
+	SearchSecrets(context.Context, string, string) ([]domain.Secret, error)
 	DeleteSecret(context.Context, string, string, int64) error
 	Ping(context.Context) error
 	Close() error

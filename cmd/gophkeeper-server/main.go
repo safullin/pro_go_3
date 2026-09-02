@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -21,8 +22,10 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(os.Args[1:]); err != nil {
-		log.Printf("server stopped: %v", err)
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -37,30 +40,31 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			slog.Error("database close failed", "error", closeErr)
+		}
+	}()
 	tokens, err := auth.NewManager(cfg.AuthSecret, cfg.TokenLifetime)
 	if err != nil {
 		return err
 	}
-	options := make([]grpc.ServerOption, 0, 1)
-	if cfg.TLSCert != "" {
-		transport, loadErr := credentials.NewServerTLSFromFile(cfg.TLSCert, cfg.TLSKey)
-		if loadErr != nil {
-			return fmt.Errorf("load TLS certificate: %w", loadErr)
-		}
-		options = append(options, grpc.Creds(transport))
+	certificate, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+	if err != nil {
+		return fmt.Errorf("load TLS certificate: %w", err)
 	}
+	transport := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}})
 	listener, err := net.Listen("tcp", cfg.Address)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Address, err)
 	}
-	defer listener.Close()
-	grpcServer := server.NewGRPCServer(server.NewService(store, tokens), tokens, options...)
+	defer func() { _ = listener.Close() }()
+	grpcServer := server.NewGRPCServer(server.NewService(store, tokens), tokens, transport)
 	serveErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- grpcServer.Serve(listener)
 	}()
-	log.Printf("GophKeeper server is listening on %s", cfg.Address)
+	slog.Info("server started", "address", cfg.Address)
 	select {
 	case err = <-serveErrors:
 		if errors.Is(err, grpc.ErrServerStopped) {

@@ -10,7 +10,7 @@ import (
 func TestParseServer(t *testing.T) {
 	cleanEnvironment(t, "RUN_ADDRESS", "DATABASE_URI", "AUTH_SECRET", "TLS_CERT", "TLS_KEY", "TOKEN_TTL")
 	secret := strings.Repeat("s", 32)
-	cfg, err := ParseServer([]string{"-a", "localhost:4000", "-d", "postgres://db", "-auth-secret", secret, "-token-ttl", "2h"})
+	cfg, err := ParseServer([]string{"-a", "localhost:4000", "-d", "postgres://db", "-auth-secret", secret, "-tls-cert", "cert.pem", "-tls-key", "key.pem", "-token-ttl", "2h"})
 	if err != nil || cfg.Address != "localhost:4000" || cfg.DatabaseURI != "postgres://db" || cfg.TokenLifetime != 2*time.Hour {
 		t.Fatalf("unexpected server config: %+v %v", cfg, err)
 	}
@@ -33,7 +33,7 @@ func TestParseServerErrors(t *testing.T) {
 		{},
 		{"-d", "postgres://db", "-auth-secret", "short"},
 		{"-d", "postgres://db", "-auth-secret", secret, "-tls-cert", "cert.pem"},
-		{"-d", "postgres://db", "-auth-secret", secret, "-token-ttl", "0s"},
+		{"-d", "postgres://db", "-auth-secret", secret, "-tls-cert", "cert.pem", "-tls-key", "key.pem", "-token-ttl", "0s"},
 		{"-unknown"},
 	}
 	for _, args := range tests {
@@ -50,16 +50,15 @@ func TestParseServerErrors(t *testing.T) {
 }
 
 func TestParseClient(t *testing.T) {
-	cleanEnvironment(t, "GOPHKEEPER_ADDRESS", "GOPHKEEPER_CA", "GOPHKEEPER_SERVER_NAME", "GOPHKEEPER_SESSION", "GOPHKEEPER_INSECURE", "GOPHKEEPER_TIMEOUT")
-	cfg, err := ParseClient([]string{"-a", "localhost:4000", "-insecure", "-timeout", "2s"})
-	if err != nil || !cfg.Insecure || cfg.Timeout != 2*time.Second {
+	cleanEnvironment(t, "GOPHKEEPER_ADDRESS", "GOPHKEEPER_CA", "GOPHKEEPER_SERVER_NAME", "GOPHKEEPER_SESSION", "GOPHKEEPER_TIMEOUT")
+	cfg, err := ParseClient([]string{"-a", "localhost:4000", "-ca", "ca.pem", "-timeout", "2s"})
+	if err != nil || cfg.CAFile != "ca.pem" || cfg.Timeout != 2*time.Second {
 		t.Fatalf("unexpected client config: %+v %v", cfg, err)
 	}
 	t.Setenv("GOPHKEEPER_ADDRESS", "localhost:5000")
 	t.Setenv("GOPHKEEPER_CA", "ca.pem")
 	t.Setenv("GOPHKEEPER_SERVER_NAME", "keeper.local")
 	t.Setenv("GOPHKEEPER_SESSION", "session.json")
-	t.Setenv("GOPHKEEPER_INSECURE", "false")
 	t.Setenv("GOPHKEEPER_TIMEOUT", "3s")
 	cfg, err = ParseClient(nil)
 	if err != nil || cfg.Address != "localhost:5000" || cfg.CAFile != "ca.pem" || cfg.Timeout != 3*time.Second {
@@ -68,17 +67,13 @@ func TestParseClient(t *testing.T) {
 }
 
 func TestParseClientErrors(t *testing.T) {
-	cleanEnvironment(t, "GOPHKEEPER_ADDRESS", "GOPHKEEPER_CA", "GOPHKEEPER_SERVER_NAME", "GOPHKEEPER_SESSION", "GOPHKEEPER_INSECURE", "GOPHKEEPER_TIMEOUT")
-	for _, args := range [][]string{{}, {"-insecure", "-timeout", "0s"}, {"-unknown"}} {
+	cleanEnvironment(t, "GOPHKEEPER_ADDRESS", "GOPHKEEPER_CA", "GOPHKEEPER_SERVER_NAME", "GOPHKEEPER_SESSION", "GOPHKEEPER_TIMEOUT")
+	for _, args := range [][]string{{}, {"-ca", "ca.pem", "-timeout", "0s"}, {"-unknown"}} {
 		if _, err := ParseClient(args); err == nil {
 			t.Fatalf("invalid client config accepted: %v", args)
 		}
 	}
-	t.Setenv("GOPHKEEPER_INSECURE", "bad")
-	if _, err := ParseClient(nil); err == nil {
-		t.Fatal("invalid boolean environment accepted")
-	}
-	t.Setenv("GOPHKEEPER_INSECURE", "true")
+	t.Setenv("GOPHKEEPER_CA", "ca.pem")
 	t.Setenv("GOPHKEEPER_TIMEOUT", "bad")
 	if _, err := ParseClient(nil); err == nil {
 		t.Fatal("invalid duration environment accepted")

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,24 @@ type MemoryStore struct {
 	secrets map[string]domain.Secret
 	version int64
 	closed  bool
+}
+
+// SearchSecrets returns active records whose name or metadata contains a query.
+func (s *MemoryStore) SearchSecrets(_ context.Context, userID, query string) ([]domain.Secret, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	query = strings.ToLower(strings.TrimSpace(query))
+	result := make([]domain.Secret, 0)
+	for _, secret := range s.secrets {
+		if secret.UserID != userID || secret.Deleted {
+			continue
+		}
+		if strings.Contains(strings.ToLower(secret.Name), query) || strings.Contains(strings.ToLower(secret.Metadata), query) {
+			result = append(result, cloneSecret(secret))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	return result, nil
 }
 
 // NewMemory creates an empty in-memory store.
@@ -128,6 +147,8 @@ func (s *MemoryStore) DeleteSecret(_ context.Context, userID, id string, expecte
 	s.version++
 	secret.Version = s.version
 	secret.Deleted = true
+	secret.Name = ""
+	secret.Metadata = ""
 	secret.Ciphertext = nil
 	secret.Nonce = nil
 	secret.UpdatedAt = time.Now().UTC()

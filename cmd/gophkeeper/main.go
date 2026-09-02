@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/safullin/pro_go_3/internal/cli"
@@ -14,8 +14,10 @@ var (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := execute(os.Args[1:]); err != nil {
-		log.Printf("gophkeeper: %v", err)
+		slog.Error("client stopped", "error", err)
+		os.Exit(1)
 	}
 }
 

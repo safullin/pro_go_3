@@ -52,11 +52,32 @@ func Encrypt(key []byte, id string, kind domain.SecretKind, payload domain.Paylo
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal payload: %w", err)
 	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, nil, fmt.Errorf("generate nonce: %w", err)
+	return seal(aead, plain, additionalData(id, kind))
+}
+
+// EncryptBytes encrypts arbitrary data for local protected storage.
+func EncryptBytes(key, plaintext, additionalData []byte) ([]byte, []byte, error) {
+	aead, err := newAEAD(key)
+	if err != nil {
+		return nil, nil, err
 	}
-	return aead.Seal(nil, nonce, plain, additionalData(id, kind)), nonce, nil
+	return seal(aead, plaintext, additionalData)
+}
+
+// DecryptBytes authenticates and decrypts arbitrary locally stored data.
+func DecryptBytes(key, ciphertext, nonce, additionalData []byte) ([]byte, error) {
+	aead, err := newAEAD(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != aead.NonceSize() {
+		return nil, errors.New("invalid nonce")
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, additionalData)
+	if err != nil {
+		return nil, errors.New("unable to decrypt data")
+	}
+	return plaintext, nil
 }
 
 // Decrypt authenticates, decrypts and validates a private payload.
@@ -95,4 +116,12 @@ func newAEAD(key []byte) (cipher.AEAD, error) {
 
 func additionalData(id string, kind domain.SecretKind) []byte {
 	return []byte(fmt.Sprintf("%s:%d", id, kind))
+}
+
+func seal(aead cipher.AEAD, plaintext, additionalData []byte) ([]byte, []byte, error) {
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	return aead.Seal(nil, nonce, plaintext, additionalData), nonce, nil
 }

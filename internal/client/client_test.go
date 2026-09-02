@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
@@ -10,7 +11,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/safullin/pro_go_3/internal/auth"
@@ -18,9 +20,10 @@ import (
 	"github.com/safullin/pro_go_3/internal/domain"
 	"github.com/safullin/pro_go_3/internal/server"
 	"github.com/safullin/pro_go_3/internal/storage"
+	"github.com/safullin/pro_go_3/internal/testcert"
 )
 
-func TestClientWorkflow(t *testing.T) {
+func TestClientWorkflowAndCache(t *testing.T) {
 	api, closeServer := newClientTestServer(t)
 	defer closeServer()
 	ctx := context.Background()
@@ -32,18 +35,54 @@ func TestClientWorkflow(t *testing.T) {
 		t.Fatalf("register failed: %+v %v", session, err)
 	}
 	entry, err := api.Put(ctx, "", domain.SecretKindCredentials, domain.Payload{
-		Name: "example.com", Credentials: &domain.Credentials{Login: "alice", Password: "secret"},
+		Name: "example.com", Metadata: "personal", Credentials: &domain.Credentials{Login: "alice", Password: "secret"},
 	}, 0)
-	if err != nil || entry.Secret.ID == "" || entry.Secret.Version == 0 {
+	if err != nil || entry.Secret.ID == "" || entry.Secret.Version == 0 || entry.Secret.Name != "example.com" {
 		t.Fatalf("put failed: %+v %v", entry, err)
 	}
 	loaded, err := api.Get(ctx, entry.Secret.ID)
 	if err != nil || loaded.Payload.Credentials.Password != "secret" {
 		t.Fatalf("get failed: %+v %v", loaded, err)
 	}
-	initial, err := api.Sync(ctx, 0)
+	search, err := api.Search(ctx, "personal")
+	if err != nil || len(search) != 1 || search[0].Secret.ID != entry.Secret.ID {
+		t.Fatalf("search failed: %+v %v", search, err)
+	}
+	if _, err = api.Search(ctx, " "); err == nil {
+		t.Fatal("empty search accepted")
+	}
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	initial, err := api.SyncToCache(ctx, 0, cachePath)
 	if err != nil || len(initial.Entries) != 1 || initial.Cursor != entry.Secret.Version {
 		t.Fatalf("initial sync failed: %+v %v", initial, err)
+	}
+	cacheData, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cacheData, []byte("example.com")) || bytes.Contains(cacheData, []byte("secret")) {
+		t.Fatal("local cache contains plaintext")
+	}
+	offline := NewOffline()
+	if err = offline.Restore(session, "strong-password"); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := offline.ReadCache(cachePath)
+	if err != nil || len(cached.Entries) != 1 || cached.Entries[0].Payload.Name != "example.com" {
+		t.Fatalf("offline cache failed: %+v %v", cached, err)
+	}
+	if _, err = offline.GetCached(cachePath, entry.Secret.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = offline.GetCached(cachePath, "missing"); err != ErrCacheMiss {
+		t.Fatalf("expected cache miss, got %v", err)
+	}
+	cachedSearch, err := offline.SearchCached(cachePath, "EXAMPLE")
+	if err != nil || len(cachedSearch) != 1 {
+		t.Fatalf("cached search failed: %+v %v", cachedSearch, err)
+	}
+	if _, err = offline.SearchCached(cachePath, " "); err == nil {
+		t.Fatal("empty cached search accepted")
 	}
 	loaded.Payload.Credentials.Password = "changed"
 	updated, err := api.Put(ctx, entry.Secret.ID, domain.SecretKindCredentials, loaded.Payload, entry.Secret.Version)
@@ -56,15 +95,18 @@ func TestClientWorkflow(t *testing.T) {
 	if err = api.Delete(ctx, entry.Secret.ID, updated.Secret.Version); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := api.Sync(ctx, updated.Secret.Version)
+	changes, err := api.SyncToCache(ctx, updated.Secret.Version, cachePath)
 	if err != nil || len(changes.Deleted) != 1 || changes.Deleted[0] != entry.Secret.ID {
 		t.Fatalf("delete sync failed: %+v %v", changes, err)
+	}
+	cached, err = offline.ReadCache(cachePath)
+	if err != nil || len(cached.Entries) != 0 {
+		t.Fatalf("deleted cache entry remained: %+v %v", cached, err)
 	}
 	if _, err = api.Get(ctx, entry.Secret.ID); err == nil {
 		t.Fatal("deleted entry returned")
 	}
-	second, closeSecond := newClientOnSameConnection(t, api)
-	defer closeSecond()
+	second := &Client{rpc: api.rpc}
 	if _, err = second.Login(ctx, "alice", "wrong-password", "bufnet"); err == nil {
 		t.Fatal("wrong password login succeeded")
 	}
@@ -106,8 +148,8 @@ func TestSessionFiles(t *testing.T) {
 	}
 }
 
-func TestRestoreAndDialValidation(t *testing.T) {
-	api := &Client{}
+func TestRestoreDialAndCacheValidation(t *testing.T) {
+	api := NewOffline()
 	if err := api.Restore(Session{}, "password"); err == nil {
 		t.Fatal("invalid session restored")
 	}
@@ -127,12 +169,26 @@ func TestRestoreAndDialValidation(t *testing.T) {
 	if _, err := Dial(config.Client{Address: "localhost:1", CAFile: invalidCA}); err == nil {
 		t.Fatal("invalid CA accepted")
 	}
-	connection, err := Dial(config.Client{Address: "localhost:1", Insecure: true})
+	bundle, err := testcert.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validCA := filepath.Join(t.TempDir(), "valid-ca.pem")
+	if err = os.WriteFile(validCA, bundle.CertPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := Dial(config.Client{Address: "localhost:1", CAFile: validCA, ServerName: "localhost"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = connection.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err = api.ReadCache(""); err == nil {
+		t.Fatal("empty cache path accepted")
+	}
+	if !IsUnavailable(status.Error(codes.Unavailable, "down")) || !IsUnavailable(context.DeadlineExceeded) || IsUnavailable(status.Error(codes.PermissionDenied, "denied")) {
+		t.Fatal("unexpected unavailable classification")
 	}
 }
 
@@ -143,11 +199,19 @@ func newClientTestServer(t *testing.T) (*Client, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grpcServer := server.NewGRPCServer(server.NewService(storage.NewMemory(), manager), manager)
+	bundle, err := testcert.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := server.NewGRPCServer(server.NewService(storage.NewMemory(), manager), manager, bundle.ServerCredentials())
 	go func() { _ = grpcServer.Serve(listener) }()
+	clientCredentials, err := bundle.ClientCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
 	connection, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(clientCredentials),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -158,9 +222,4 @@ func newClientTestServer(t *testing.T) (*Client, func()) {
 		grpcServer.Stop()
 		_ = listener.Close()
 	}
-}
-
-func newClientOnSameConnection(t *testing.T, source *Client) (*Client, func()) {
-	t.Helper()
-	return &Client{rpc: source.rpc}, func() {}
 }

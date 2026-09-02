@@ -60,3 +60,25 @@ func TestCryptoValidation(t *testing.T) {
 		t.Fatal("short nonce was accepted")
 	}
 }
+
+func TestEncryptDecryptBytes(t *testing.T) {
+	key := make([]byte, keySize)
+	additionalData := []byte("cache")
+	ciphertext, nonce, err := EncryptBytes(key, []byte("private cache"), additionalData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := DecryptBytes(key, ciphertext, nonce, additionalData)
+	if err != nil || string(plaintext) != "private cache" {
+		t.Fatalf("decrypt bytes: %q %v", plaintext, err)
+	}
+	if _, err = DecryptBytes(key, ciphertext, nonce, []byte("other")); err == nil {
+		t.Fatal("wrong additional data accepted")
+	}
+	if _, err = DecryptBytes([]byte("short"), ciphertext, nonce, additionalData); err == nil {
+		t.Fatal("short key accepted")
+	}
+	if _, err = DecryptBytes(key, ciphertext, []byte("short"), additionalData); err == nil {
+		t.Fatal("short nonce accepted")
+	}
+}

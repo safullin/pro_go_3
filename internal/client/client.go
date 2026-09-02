@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/safullin/pro_go_3/internal/config"
@@ -52,6 +52,11 @@ func New(connection grpc.ClientConnInterface) *Client {
 	return &Client{rpc: gophkeeperpb.NewGophKeeperClient(connection)}
 }
 
+// NewOffline creates a client that can read a local cache without a server connection.
+func NewOffline() *Client {
+	return &Client{}
+}
+
 // Dial opens a configured gRPC connection.
 func Dial(cfg config.Client) (*Client, error) {
 	transport, err := transportCredentials(cfg)
@@ -78,7 +83,7 @@ func (c *Client) Close() error {
 
 // Register creates an account and initializes the local encryption key.
 func (c *Client) Register(ctx context.Context, login, password, address string) (Session, error) {
-	response, err := c.rpc.Register(ctx, &gophkeeperpb.RegisterRequest{Login: login, Password: password})
+	response, err := c.rpc.Register(ctx, gophkeeperpb.RegisterRequest_builder{Login: login, Password: password}.Build())
 	if err != nil {
 		return Session{}, err
 	}
@@ -87,7 +92,7 @@ func (c *Client) Register(ctx context.Context, login, password, address string) 
 
 // Login authenticates an account and initializes the local encryption key.
 func (c *Client) Login(ctx context.Context, login, password, address string) (Session, error) {
-	response, err := c.rpc.Login(ctx, &gophkeeperpb.LoginRequest{Login: login, Password: password})
+	response, err := c.rpc.Login(ctx, gophkeeperpb.LoginRequest_builder{Login: login, Password: password}.Build())
 	if err != nil {
 		return Session{}, err
 	}
@@ -120,15 +125,18 @@ func (c *Client) Put(ctx context.Context, id string, kind domain.SecretKind, pay
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	response, err := c.rpc.PutSecret(c.authorize(ctx), &gophkeeperpb.PutSecretRequest{
-		Secret: &gophkeeperpb.Secret{
-			Id:         id,
-			Kind:       gophkeeperpb.SecretKind(kind),
-			Ciphertext: ciphertext,
-			Nonce:      nonce,
-		},
+	secret := gophkeeperpb.Secret_builder{
+		Id:         id,
+		Kind:       gophkeeperpb.SecretKind(kind),
+		Name:       payload.Name,
+		Metadata:   payload.Metadata,
+		Ciphertext: ciphertext,
+		Nonce:      nonce,
+	}.Build()
+	response, err := c.rpc.PutSecret(c.authorize(ctx), gophkeeperpb.PutSecretRequest_builder{
+		Secret:          secret,
 		ExpectedVersion: expectedVersion,
-	})
+	}.Build())
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -140,12 +148,12 @@ func (c *Client) Get(ctx context.Context, id string) (domain.Entry, error) {
 	if err := c.ready(); err != nil {
 		return domain.Entry{}, err
 	}
-	response, err := c.rpc.GetSecret(c.authorize(ctx), &gophkeeperpb.GetSecretRequest{Id: id})
+	response, err := c.rpc.GetSecret(c.authorize(ctx), gophkeeperpb.GetSecretRequest_builder{Id: id}.Build())
 	if err != nil {
 		return domain.Entry{}, err
 	}
 	secret := secretFromProto(response)
-	payload, err := vaultcrypto.Decrypt(c.key, secret.ID, secret.Kind, secret.Ciphertext, secret.Nonce)
+	payload, err := c.decrypt(secret)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -157,22 +165,54 @@ func (c *Client) Sync(ctx context.Context, sinceVersion int64) (SyncResult, erro
 	if err := c.ready(); err != nil {
 		return SyncResult{}, err
 	}
-	response, err := c.rpc.ListSecrets(c.authorize(ctx), &gophkeeperpb.ListSecretsRequest{SinceVersion: sinceVersion})
+	secrets, cursor, err := c.listRaw(ctx, sinceVersion)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	result := SyncResult{
-		Entries: make([]domain.Entry, 0, len(response.GetSecrets())),
-		Deleted: make([]string, 0),
-		Cursor:  response.GetCursor(),
+	return c.decryptSecrets(secrets, cursor)
+}
+
+// Search finds and decrypts active secrets by name or metadata.
+func (c *Client) Search(ctx context.Context, query string) ([]domain.Entry, error) {
+	if err := c.ready(); err != nil {
+		return nil, err
 	}
-	for _, item := range response.GetSecrets() {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	response, err := c.rpc.SearchSecrets(c.authorize(ctx), gophkeeperpb.SearchSecretsRequest_builder{Query: query}.Build())
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.decryptSecrets(response.GetSecrets(), 0)
+	if err != nil {
+		return nil, err
+	}
+	return result.Entries, nil
+}
+
+func (c *Client) listRaw(ctx context.Context, sinceVersion int64) ([]*gophkeeperpb.Secret, int64, error) {
+	response, err := c.rpc.ListSecrets(c.authorize(ctx), gophkeeperpb.ListSecretsRequest_builder{SinceVersion: sinceVersion}.Build())
+	if err != nil {
+		return nil, sinceVersion, err
+	}
+	return response.GetSecrets(), response.GetCursor(), nil
+}
+
+func (c *Client) decryptSecrets(secrets []*gophkeeperpb.Secret, cursor int64) (SyncResult, error) {
+	result := SyncResult{
+		Entries: make([]domain.Entry, 0, len(secrets)),
+		Deleted: make([]string, 0),
+		Cursor:  cursor,
+	}
+	for _, item := range secrets {
 		secret := secretFromProto(item)
 		if secret.Deleted {
 			result.Deleted = append(result.Deleted, secret.ID)
 			continue
 		}
-		payload, decryptErr := vaultcrypto.Decrypt(c.key, secret.ID, secret.Kind, secret.Ciphertext, secret.Nonce)
+		payload, decryptErr := c.decrypt(secret)
 		if decryptErr != nil {
 			return SyncResult{}, fmt.Errorf("decrypt secret %s: %w", secret.ID, decryptErr)
 		}
@@ -186,7 +226,7 @@ func (c *Client) Delete(ctx context.Context, id string, expectedVersion int64) e
 	if err := c.ready(); err != nil {
 		return err
 	}
-	_, err := c.rpc.DeleteSecret(c.authorize(ctx), &gophkeeperpb.DeleteSecretRequest{Id: id, ExpectedVersion: expectedVersion})
+	_, err := c.rpc.DeleteSecret(c.authorize(ctx), gophkeeperpb.DeleteSecretRequest_builder{Id: id, ExpectedVersion: expectedVersion}.Build())
 	return err
 }
 
@@ -265,6 +305,17 @@ func (c *Client) authorize(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
 }
 
+func (c *Client) decrypt(secret domain.Secret) (domain.Payload, error) {
+	payload, err := vaultcrypto.Decrypt(c.key, secret.ID, secret.Kind, secret.Ciphertext, secret.Nonce)
+	if err != nil {
+		return domain.Payload{}, err
+	}
+	if payload.Name != secret.Name || payload.Metadata != secret.Metadata {
+		return domain.Payload{}, errors.New("secret metadata integrity check failed")
+	}
+	return payload, nil
+}
+
 func secretFromProto(secret *gophkeeperpb.Secret) domain.Secret {
 	updatedAt := time.Time{}
 	if secret.GetUpdatedAt() != nil {
@@ -273,6 +324,8 @@ func secretFromProto(secret *gophkeeperpb.Secret) domain.Secret {
 	return domain.Secret{
 		ID:         secret.GetId(),
 		Kind:       domain.SecretKind(secret.GetKind()),
+		Name:       secret.GetName(),
+		Metadata:   secret.GetMetadata(),
 		Ciphertext: append([]byte(nil), secret.GetCiphertext()...),
 		Nonce:      append([]byte(nil), secret.GetNonce()...),
 		Version:    secret.GetVersion(),
@@ -282,9 +335,6 @@ func secretFromProto(secret *gophkeeperpb.Secret) domain.Secret {
 }
 
 func transportCredentials(cfg config.Client) (credentials.TransportCredentials, error) {
-	if cfg.Insecure {
-		return insecure.NewCredentials(), nil
-	}
 	certificate, err := os.ReadFile(cfg.CAFile)
 	if err != nil {
 		return nil, fmt.Errorf("read CA certificate: %w", err)

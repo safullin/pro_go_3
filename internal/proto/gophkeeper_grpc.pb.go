@@ -11,7 +11,6 @@ import (
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
-	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -20,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GophKeeper_Register_FullMethodName     = "/gophkeeper.v1.GophKeeper/Register"
-	GophKeeper_Login_FullMethodName        = "/gophkeeper.v1.GophKeeper/Login"
-	GophKeeper_PutSecret_FullMethodName    = "/gophkeeper.v1.GophKeeper/PutSecret"
-	GophKeeper_GetSecret_FullMethodName    = "/gophkeeper.v1.GophKeeper/GetSecret"
-	GophKeeper_ListSecrets_FullMethodName  = "/gophkeeper.v1.GophKeeper/ListSecrets"
-	GophKeeper_DeleteSecret_FullMethodName = "/gophkeeper.v1.GophKeeper/DeleteSecret"
+	GophKeeper_Register_FullMethodName      = "/gophkeeper.v1.GophKeeper/Register"
+	GophKeeper_Login_FullMethodName         = "/gophkeeper.v1.GophKeeper/Login"
+	GophKeeper_PutSecret_FullMethodName     = "/gophkeeper.v1.GophKeeper/PutSecret"
+	GophKeeper_GetSecret_FullMethodName     = "/gophkeeper.v1.GophKeeper/GetSecret"
+	GophKeeper_ListSecrets_FullMethodName   = "/gophkeeper.v1.GophKeeper/ListSecrets"
+	GophKeeper_SearchSecrets_FullMethodName = "/gophkeeper.v1.GophKeeper/SearchSecrets"
+	GophKeeper_DeleteSecret_FullMethodName  = "/gophkeeper.v1.GophKeeper/DeleteSecret"
 )
 
 // GophKeeperClient is the client API for GophKeeper service.
@@ -37,7 +37,8 @@ type GophKeeperClient interface {
 	PutSecret(ctx context.Context, in *PutSecretRequest, opts ...grpc.CallOption) (*Secret, error)
 	GetSecret(ctx context.Context, in *GetSecretRequest, opts ...grpc.CallOption) (*Secret, error)
 	ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error)
-	DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	SearchSecrets(ctx context.Context, in *SearchSecretsRequest, opts ...grpc.CallOption) (*SearchSecretsResponse, error)
+	DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*DeleteSecretResponse, error)
 }
 
 type gophKeeperClient struct {
@@ -98,9 +99,19 @@ func (c *gophKeeperClient) ListSecrets(ctx context.Context, in *ListSecretsReque
 	return out, nil
 }
 
-func (c *gophKeeperClient) DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *gophKeeperClient) SearchSecrets(ctx context.Context, in *SearchSecretsRequest, opts ...grpc.CallOption) (*SearchSecretsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
+	out := new(SearchSecretsResponse)
+	err := c.cc.Invoke(ctx, GophKeeper_SearchSecrets_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gophKeeperClient) DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*DeleteSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSecretResponse)
 	err := c.cc.Invoke(ctx, GophKeeper_DeleteSecret_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -117,7 +128,8 @@ type GophKeeperServer interface {
 	PutSecret(context.Context, *PutSecretRequest) (*Secret, error)
 	GetSecret(context.Context, *GetSecretRequest) (*Secret, error)
 	ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error)
-	DeleteSecret(context.Context, *DeleteSecretRequest) (*emptypb.Empty, error)
+	SearchSecrets(context.Context, *SearchSecretsRequest) (*SearchSecretsResponse, error)
+	DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error)
 	mustEmbedUnimplementedGophKeeperServer()
 }
 
@@ -143,7 +155,10 @@ func (UnimplementedGophKeeperServer) GetSecret(context.Context, *GetSecretReques
 func (UnimplementedGophKeeperServer) ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListSecrets not implemented")
 }
-func (UnimplementedGophKeeperServer) DeleteSecret(context.Context, *DeleteSecretRequest) (*emptypb.Empty, error) {
+func (UnimplementedGophKeeperServer) SearchSecrets(context.Context, *SearchSecretsRequest) (*SearchSecretsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SearchSecrets not implemented")
+}
+func (UnimplementedGophKeeperServer) DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteSecret not implemented")
 }
 func (UnimplementedGophKeeperServer) mustEmbedUnimplementedGophKeeperServer() {}
@@ -257,6 +272,24 @@ func _GophKeeper_ListSecrets_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GophKeeper_SearchSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchSecretsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GophKeeperServer).SearchSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GophKeeper_SearchSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GophKeeperServer).SearchSecrets(ctx, req.(*SearchSecretsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _GophKeeper_DeleteSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteSecretRequest)
 	if err := dec(in); err != nil {
@@ -301,6 +334,10 @@ var GophKeeper_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSecrets",
 			Handler:    _GophKeeper_ListSecrets_Handler,
+		},
+		{
+			MethodName: "SearchSecrets",
+			Handler:    _GophKeeper_SearchSecrets_Handler,
 		},
 		{
 			MethodName: "DeleteSecret",

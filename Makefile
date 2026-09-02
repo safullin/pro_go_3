@@ -1,7 +1,7 @@
 .PHONY: generate test cover build build-all
 
 generate:
-	protoc -I proto --go_out=. --go_opt=module=github.com/safullin/pro_go_3 --go-grpc_out=. --go-grpc_opt=module=github.com/safullin/pro_go_3 proto/gophkeeper.proto
+	protoc -I proto --go_out=. --go_opt=module=github.com/safullin/pro_go_3 --go_opt=default_api_level=API_OPAQUE --go-grpc_out=. --go-grpc_opt=module=github.com/safullin/pro_go_3 proto/gophkeeper.proto
 
 test:
 	go test -race ./...
