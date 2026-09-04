@@ -118,6 +118,9 @@ func (c *Client) Put(ctx context.Context, id string, kind domain.SecretKind, pay
 	if err := c.ready(); err != nil {
 		return domain.Entry{}, err
 	}
+	if err := domain.ValidateSecretMetadata(payload.Name, payload.Metadata); err != nil {
+		return domain.Entry{}, err
+	}
 	if id == "" {
 		id = uuid.NewString()
 	}
@@ -153,7 +156,7 @@ func (c *Client) Get(ctx context.Context, id string) (domain.Entry, error) {
 		return domain.Entry{}, err
 	}
 	secret := secretFromProto(response)
-	payload, err := c.decrypt(secret)
+	payload, err := c.decrypt(&secret)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -212,7 +215,7 @@ func (c *Client) decryptSecrets(secrets []*gophkeeperpb.Secret, cursor int64) (S
 			result.Deleted = append(result.Deleted, secret.ID)
 			continue
 		}
-		payload, decryptErr := c.decrypt(secret)
+		payload, decryptErr := c.decrypt(&secret)
 		if decryptErr != nil {
 			return SyncResult{}, fmt.Errorf("decrypt secret %s: %w", secret.ID, decryptErr)
 		}
@@ -305,12 +308,15 @@ func (c *Client) authorize(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
 }
 
-func (c *Client) decrypt(secret domain.Secret) (domain.Payload, error) {
+func (c *Client) decrypt(secret *domain.Secret) (domain.Payload, error) {
 	payload, err := vaultcrypto.Decrypt(c.key, secret.ID, secret.Kind, secret.Ciphertext, secret.Nonce)
 	if err != nil {
 		return domain.Payload{}, err
 	}
-	if payload.Name != secret.Name || payload.Metadata != secret.Metadata {
+	if secret.Name == "" {
+		secret.Name = payload.Name
+		secret.Metadata = payload.Metadata
+	} else if payload.Name != secret.Name || payload.Metadata != secret.Metadata {
 		return domain.Payload{}, errors.New("secret metadata integrity check failed")
 	}
 	return payload, nil

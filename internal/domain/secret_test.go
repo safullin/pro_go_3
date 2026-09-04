@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSecretKinds(t *testing.T) {
 	tests := []struct {
@@ -58,5 +61,27 @@ func TestPayloadValidate(t *testing.T) {
 		if err := test.payload.Validate(test.kind); err == nil {
 			t.Fatalf("invalid payload accepted: %+v", test)
 		}
+	}
+}
+
+func TestValidateSecretMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name, secretName, metadata string
+		wantError                  bool
+	}{
+		{name: "empty", wantError: true},
+		{name: "blank", secretName: " \t", wantError: true},
+		{name: "no metadata", secretName: "Note"},
+		{name: "at limits", secretName: strings.Repeat("n", MaxSecretNameLength), metadata: strings.Repeat("m", MaxSecretMetadataLength)},
+		{name: "unicode at limits", secretName: strings.Repeat("\u0438", MaxSecretNameLength), metadata: strings.Repeat("\u044f", MaxSecretMetadataLength)},
+		{name: "long name", secretName: strings.Repeat("\u0438", MaxSecretNameLength+1), wantError: true},
+		{name: "long metadata", secretName: "Note", metadata: strings.Repeat("\u044f", MaxSecretMetadataLength+1), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateSecretMetadata(test.secretName, test.metadata)
+			if (err != nil) != test.wantError {
+				t.Fatalf("unexpected validation result: %v", err)
+			}
+		})
 	}
 }

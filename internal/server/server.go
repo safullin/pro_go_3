@@ -265,8 +265,8 @@ func secretFromProto(secret *gophkeeperpb.Secret) (domain.Secret, error) {
 	if len(secret.GetNonce()) != 12 {
 		return domain.Secret{}, errors.New("invalid encryption nonce")
 	}
-	if strings.TrimSpace(secret.GetName()) == "" {
-		return domain.Secret{}, errors.New("secret name is required")
+	if err := domain.ValidateSecretMetadata(secret.GetName(), secret.GetMetadata()); err != nil {
+		return domain.Secret{}, err
 	}
 	return domain.Secret{
 		ID:         secret.GetId(),

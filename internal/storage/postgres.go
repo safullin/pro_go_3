@@ -21,6 +21,9 @@ var initialMigration string
 //go:embed migrations/002_secret_metadata.sql
 var metadataMigration string
 
+//go:embed migrations/003_secret_metadata_limits.sql
+var metadataLimitsMigration string
+
 type postgresPool interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -52,7 +55,7 @@ func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 		pool.Close()
 		return nil, err
 	}
-	for _, migration := range []string{initialMigration, metadataMigration} {
+	for _, migration := range []string{initialMigration, metadataMigration, metadataLimitsMigration} {
 		if _, err = pool.Exec(ctx, migration); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("apply database migration: %w", err)

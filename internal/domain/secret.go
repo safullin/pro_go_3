@@ -2,8 +2,17 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
+)
+
+const (
+	// MaxSecretNameLength limits names of new or updated secrets in Unicode characters.
+	MaxSecretNameLength = 255
+	// MaxSecretMetadataLength limits metadata of new or updated secrets in Unicode characters.
+	MaxSecretMetadataLength = 4096
 )
 
 // SecretKind identifies the kind of data stored in a secret.
@@ -130,6 +139,20 @@ func (p Payload) Validate(kind SecretKind) error {
 		}
 	default:
 		return errors.New("unsupported secret kind")
+	}
+	return nil
+}
+
+// ValidateSecretMetadata checks the database limits before saving a secret.
+func ValidateSecretMetadata(name, metadata string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("secret name is required")
+	}
+	if utf8.RuneCountInString(name) > MaxSecretNameLength {
+		return fmt.Errorf("secret name must not exceed %d characters", MaxSecretNameLength)
+	}
+	if utf8.RuneCountInString(metadata) > MaxSecretMetadataLength {
+		return fmt.Errorf("secret metadata must not exceed %d characters", MaxSecretMetadataLength)
 	}
 	return nil
 }

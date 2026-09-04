@@ -433,7 +433,7 @@ func (a *application) versionCommand() *cobra.Command {
 }
 
 func (a *application) withAuthenticated(command *cobra.Command, action func(context.Context, *client.Client) error) error {
-	session, password, _, err := a.offlineClient()
+	session, password, err := a.loadCredentials()
 	if err != nil {
 		return err
 	}
@@ -451,17 +451,20 @@ func (a *application) withAuthenticated(command *cobra.Command, action func(cont
 }
 
 func (a *application) withOnlineFallback(command *cobra.Command, online func(context.Context, *client.Client) error, offline func(*client.Client) error) error {
-	session, password, cached, err := a.offlineClient()
+	session, password, err := a.loadCredentials()
 	if err != nil {
 		return err
 	}
-	api, err := a.connect()
-	if err != nil {
-		return offline(cached)
+	api, connectErr := a.connect()
+	if connectErr != nil {
+		api = client.NewOffline()
 	}
 	defer func() { _ = api.Close() }()
 	if err = api.Restore(session, password); err != nil {
 		return fmt.Errorf("restore session: %w", err)
+	}
+	if connectErr != nil {
+		return offline(api)
 	}
 	ctx, cancel := context.WithTimeout(command.Context(), a.timeout)
 	defer cancel()
@@ -471,23 +474,19 @@ func (a *application) withOnlineFallback(command *cobra.Command, online func(con
 	if !client.IsUnavailable(err) {
 		return err
 	}
-	return offline(cached)
+	return offline(api)
 }
 
-func (a *application) offlineClient() (client.Session, string, *client.Client, error) {
+func (a *application) loadCredentials() (client.Session, string, error) {
 	session, err := client.LoadSession(a.sessionFile)
 	if err != nil {
-		return client.Session{}, "", nil, fmt.Errorf("load session: %w", err)
+		return client.Session{}, "", fmt.Errorf("load session: %w", err)
 	}
 	password, err := a.masterPassword()
 	if err != nil {
-		return client.Session{}, "", nil, err
+		return client.Session{}, "", err
 	}
-	api := client.NewOffline()
-	if err = api.Restore(session, password); err != nil {
-		return client.Session{}, "", nil, fmt.Errorf("restore session: %w", err)
-	}
-	return session, password, api, nil
+	return session, password, nil
 }
 
 func (a *application) connect() (*client.Client, error) {

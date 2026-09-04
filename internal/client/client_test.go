@@ -24,7 +24,7 @@ import (
 )
 
 func TestClientWorkflowAndCache(t *testing.T) {
-	api, closeServer := newClientTestServer(t)
+	api, _, closeServer := newClientTestServer(t)
 	defer closeServer()
 	ctx := context.Background()
 	if _, err := api.Put(ctx, "", domain.SecretKindText, domain.Payload{}, 0); err == nil {
@@ -192,7 +192,7 @@ func TestRestoreDialAndCacheValidation(t *testing.T) {
 	}
 }
 
-func newClientTestServer(t *testing.T) (*Client, func()) {
+func newClientTestServer(t *testing.T) (*Client, *storage.MemoryStore, func()) {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	manager, err := auth.NewManager(strings.Repeat("s", 32), time.Hour)
@@ -203,7 +203,8 @@ func newClientTestServer(t *testing.T) (*Client, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grpcServer := server.NewGRPCServer(server.NewService(storage.NewMemory(), manager), manager, bundle.ServerCredentials())
+	store := storage.NewMemory()
+	grpcServer := server.NewGRPCServer(server.NewService(store, manager), manager, bundle.ServerCredentials())
 	go func() { _ = grpcServer.Serve(listener) }()
 	clientCredentials, err := bundle.ClientCredentials()
 	if err != nil {
@@ -217,7 +218,7 @@ func newClientTestServer(t *testing.T) (*Client, func()) {
 		t.Fatal(err)
 	}
 	api := New(connection)
-	return api, func() {
+	return api, store, func() {
 		_ = connection.Close()
 		grpcServer.Stop()
 		_ = listener.Close()

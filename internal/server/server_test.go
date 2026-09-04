@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/safullin/pro_go_3/internal/auth"
+	"github.com/safullin/pro_go_3/internal/domain"
 	gophkeeperpb "github.com/safullin/pro_go_3/internal/proto"
 	"github.com/safullin/pro_go_3/internal/storage"
 	"github.com/safullin/pro_go_3/internal/testcert"
@@ -147,6 +148,27 @@ func TestServiceRequiresIdentity(t *testing.T) {
 		if err := check(); status.Code(err) != codes.Unauthenticated {
 			t.Fatalf("direct call without identity succeeded: %v", err)
 		}
+	}
+}
+
+func TestPutSecretMetadataLimits(t *testing.T) {
+	service := &Service{store: storage.NewMemory()}
+	ctx := context.WithValue(context.Background(), identityKey{}, auth.Identity{UserID: uuid.NewString()})
+	for _, test := range []struct {
+		name, secretName, metadata string
+		wantCode                   codes.Code
+	}{
+		{name: "at limits", secretName: strings.Repeat("\u0438", domain.MaxSecretNameLength), metadata: strings.Repeat("\u044f", domain.MaxSecretMetadataLength), wantCode: codes.OK},
+		{name: "long name", secretName: strings.Repeat("\u0438", domain.MaxSecretNameLength+1), wantCode: codes.InvalidArgument},
+		{name: "long metadata", secretName: "Note", metadata: strings.Repeat("\u044f", domain.MaxSecretMetadataLength+1), wantCode: codes.InvalidArgument},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := putRequest(uuid.NewString(), test.secretName, test.metadata, []byte("encrypted"), 0)
+			_, err := service.PutSecret(ctx, request)
+			if status.Code(err) != test.wantCode {
+				t.Fatalf("unexpected status: %v", err)
+			}
+		})
 	}
 }
 

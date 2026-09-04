@@ -99,7 +99,7 @@ func (c *Client) GetCached(path, id string) (domain.Entry, error) {
 	if !ok {
 		return domain.Entry{}, ErrCacheMiss
 	}
-	payload, err := c.decrypt(secret)
+	payload, err := c.decrypt(&secret)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -133,7 +133,7 @@ func IsUnavailable(err error) bool {
 func (c *Client) decryptDomainSecrets(secrets []domain.Secret, cursor int64) (SyncResult, error) {
 	result := SyncResult{Entries: make([]domain.Entry, 0, len(secrets)), Deleted: make([]string, 0), Cursor: cursor}
 	for _, secret := range secrets {
-		payload, err := c.decrypt(secret)
+		payload, err := c.decrypt(&secret)
 		if err != nil {
 			return SyncResult{}, fmt.Errorf("decrypt secret %s: %w", secret.ID, err)
 		}
