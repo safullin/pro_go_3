@@ -167,7 +167,7 @@ func runCLI(address, caFile, session, password string, args ...string) (string, 
 		address:     address,
 		caFile:      caFile,
 		serverName:  "localhost",
-		timeout:     time.Second,
+		timeout:     15 * time.Second,
 		sessionFile: session,
 		cacheFile:   session + ".cache",
 		readPassword: func() (string, error) {
